@@ -89,13 +89,23 @@ async function run() {
 
         const tg = new TgLogger(profile);
         await tg.log(`💀 <b>GlassPanel 幽灵协议 [${currentIndex + 1}/${config.batches.length}] 激活</b>`);
-        await tg.log(`\n👁️ <b>目标代号: ${profile.name}</b> (分配 ${task.count} 个动态掩码)`);
         
-        // 🧹 清理
+        // 1. 🧹 先清理旧资源，保证配额充足
+        await tg.log(`🗑️ 正在抹除旧域名与云端残留...`);
         try {
-            await fetch(`${WORKER_URL}/api/saas/cleanup`, { method: 'POST', headers, body: JSON.stringify({ profileName: profile.name, baseDomain: profile.baseDomain, apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, dnsZoneId: profile.dnsZoneId, snippetRule: profile.snippetRule || '' }) });
-        } catch (e) {}
+            const cleanupRes = await fetch(`${WORKER_URL}/api/saas/cleanup`, {
+                method: 'POST', headers,
+                body: JSON.stringify({ profileName: profile.name, baseDomain: profile.baseDomain, apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, dnsZoneId: profile.dnsZoneId, snippetRule: profile.snippetRule || '' })
+            });
+            const cleanupJson = await cleanupRes.json();
+            await tg.log(`✅ 废弃资产清理完毕: ${cleanupJson.message || 'SUCCESS'}`);
+        } catch (e) {
+            await tg.log(`⚠️ 清理指令发送失败，但已强制进入重构阶段...`);
+        }
 
+        await tg.log(`👁️ <b>目标代号: ${profile.name}</b> (分配 ${task.count} 个动态掩码)`);
+        
+        // 2. 并发创建
         const pendingHosts = [];
         for (let i = 0; i < task.count; i++) {
             const host = generateHostPattern(profile.domainPattern, profile.baseDomain); 
@@ -110,7 +120,7 @@ async function run() {
             if (createRes.success) pendingHosts.push({ id: createRes.hostId, host: host, mask: mask, index: i+1, retryCount: 0 });
         }
 
-        // 验证与精准补发
+        // 3. 验证与精准补发
         let activeHosts = [];
         for (let w = 0; w < 24; w++) { 
             await new Promise(r => setTimeout(r, 10000)); // 10秒一循环
@@ -126,7 +136,7 @@ async function run() {
                     activeHosts.push(item.host);
                     await tg.log(` ✅ [${item.index}] 幽灵 ${item.mask} 潜行成功`);
                 } else {
-                    // 精准补发：如果没激活，且重试次数 < 2，触发单点修复
+                    // 精准补发：如果没激活，且重试 < 2 次，触发单点修复
                     if (item.retryCount < 2) {
                         item.retryCount++;
                         await tg.log(`🔄 [${item.index}] ${item.mask} 验证缺失，正在重写 TXT 记录 (第 ${item.retryCount} 次)`);
@@ -140,7 +150,7 @@ async function run() {
             if (activeHosts.length === pendingHosts.length) break;
         }
 
-        // 同步面板
+        // 4. 同步面板
         if (activeHosts.length > 0) {
             let successCount = 0;
             for (const host of activeHosts) {
@@ -150,9 +160,9 @@ async function run() {
                 }).then(r => r.json()).catch(()=>({}));
                 if (syncRes.success) successCount++;
             }
-            await tg.log(`🎉 <b>成功写入 ${successCount} 个免杀隐蔽节点</b>`);
+            await tg.log(`🎉 <b>成功下发 ${successCount} 个免杀隐蔽节点</b>`);
         }
-        await tg.log(`\n🏁 <b>幽灵行动结束。</b>`);
+        await tg.log(`\n🏁 <b>幽灵行动结束，切断所有外部连接。</b>`);
     }
 
     config.currentIndex = (currentIndex + 1) % config.batches.length;
