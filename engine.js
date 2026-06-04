@@ -4,7 +4,6 @@ const ADMIN_PWD = process.env.ADMIN_PWD;
 async function run() {
     console.log("🚀 开始向 Worker 请求 SaaS 任务配置...");
     
-    // 1. 去你的面板拿所有的账号和轮询配置
     const headers = { 'X-Admin-Password': ADMIN_PWD, 'Content-Type': 'application/json' };
     const [profilesRes, autoConfigRes] = await Promise.all([
         fetch(`${WORKER_URL}/api/saas/profiles`, { headers }),
@@ -18,26 +17,51 @@ async function run() {
         return console.log("💤 当前面板没有配置任何轮询批次任务。");
     }
 
-    // 2. 找到当前该跑哪个批次
     let currentIndex = config.currentIndex || 0;
     if (currentIndex >= config.batches.length) currentIndex = 0;
     const currentBatch = config.batches[currentIndex];
     
     console.log(`📦 本次执行第 ${currentIndex + 1} 批次，包含 ${currentBatch.length} 个任务`);
 
-    // 3. 把原先在 Worker 里的创建和验证逻辑在这里跑，由于在 GitHub 里，多久都不会超时！
     for (const task of currentBatch) {
         const profile = profiles.find(p => p.name === task.profileName);
         if (!profile) continue;
 
-        console.log(`🌐 正在处理: ${profile.name}, 数量: ${task.count}`);
+        console.log(`\n🌐 正在处理: ${profile.name}, 数量: ${task.count}`);
         
+        // ==========================================
+        // 🧹 新增：发车前，先强制清理云端和面板的旧域名
+        // ==========================================
+        console.log(`🧹 正在清理上一批的旧域名与云端残留 DNS...`);
+        try {
+            const cleanupRes = await fetch(`${WORKER_URL}/api/saas/cleanup`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                    profileName: profile.name,
+                    baseDomain: profile.baseDomain,
+                    apiToken: profile.apiToken,
+                    saasZoneId: profile.saasZoneId,
+                    dnsZoneId: profile.dnsZoneId,
+                    snippetRule: profile.snippetRule || ''
+                })
+            });
+            if (cleanupRes.ok) {
+                console.log(`✅ 旧域名清理完毕！`);
+            } else {
+                console.log(`⚠️ 清理接口响应异常，将继续尝试创建新域名。`);
+            }
+        } catch (e) {
+            console.log(`❌ 清理请求失败，跳过清理继续执行: ${e.message}`);
+        }
+        // ==========================================
+
         const successfulHosts = [];
         const pendingHosts = [];
 
         // 发起创建请求
         for (let i = 0; i < task.count; i++) {
-            const host = profile.baseDomain.replace('xxx', Math.random().toString(36).substring(2, 8)); // 简化的域名生成
+            const host = profile.baseDomain.replace('xxx', Math.random().toString(36).substring(2, 8)); 
             console.log(`请求创建: ${host}`);
             
             const createRes = await fetch(`${WORKER_URL}/api/saas/step_create`, {
@@ -52,11 +76,30 @@ async function run() {
             }
         }
 
-        // 在 GitHub 里死等证书下发（绝不会超时）
-        console.log(`⏳ 开始验证证书，请耐心等待...`);
+        console.log(`⏳ 开始下发证书验证记录并等待生效，请耐心等待...`);
         for (const item of pendingHosts) {
+            let sslReady = false;
+            for(let w=0; w<6; w++) { 
+                await new Promise(r => setTimeout(r, 10000));
+                const sslRes = await fetch(`${WORKER_URL}/api/saas/step_ssl`, {
+                    method: 'POST', headers,
+                    body: JSON.stringify({ profileName: profile.name, apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, dnsZoneId: profile.dnsZoneId, hostId: item.id })
+                }).then(r => r.json()).catch(() => ({}));
+                
+                if (sslRes.ready) {
+                    sslReady = true;
+                    console.log(`  └ 证书 TXT 验证记录下发成功`);
+                    break;
+                }
+            }
+
+            if (!sslReady) {
+                console.log(`❌ ${item.host} TXT 获取超时，跳过`);
+                continue;
+            }
+
             let active = false;
-            for(let w=0; w<15; w++) { // 循环 15 次，每次等 10 秒
+            for(let w=0; w<24; w++) { 
                 await new Promise(r => setTimeout(r, 10000));
                 const statusRes = await fetch(`${WORKER_URL}/api/saas/step_status`, {
                     method: 'POST', headers,
@@ -66,13 +109,17 @@ async function run() {
                 if (statusRes.active) {
                     active = true;
                     successfulHosts.push(item.host);
-                    console.log(`✅ ${item.host} 验证成功`);
+                    console.log(`✅ ${item.host} 验证成功，已激活！`);
                     break;
                 }
             }
+
+            if (!active) {
+                console.log(`⚠️ ${item.host} 激活超时，已放入后台队列等待 CF 自然生效。`);
+                successfulHosts.push(item.host);
+            }
         }
 
-        // 4. 将成功的域名发还给 Worker 的“专属通道”
         if (successfulHosts.length > 0) {
             console.log(`🔗 正在将 ${successfulHosts.length} 个新域名同步至面板...`);
             await fetch(`${WORKER_URL}/api/gha/sync_results`, {
@@ -90,7 +137,6 @@ async function run() {
         }
     }
 
-    // 5. 任务跑完，让 Worker 把指针推向下一批
     config.currentIndex = (currentIndex + 1) % config.batches.length;
     await fetch(`${WORKER_URL}/api/saas/auto_config`, {
         method: 'POST', headers,
