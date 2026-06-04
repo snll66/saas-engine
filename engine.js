@@ -1,6 +1,7 @@
 const WORKER_URL = process.env.WORKER_URL;
 const ADMIN_PWD = process.env.ADMIN_PWD;
 
+// 🤖 专属 TG 直播播报员
 class TgLogger {
     constructor(profile) {
         this.profile = profile;
@@ -32,6 +33,7 @@ class TgLogger {
     }
 }
 
+// 🛡️ 智能全域打码：前缀保留首字母，主域名半打码
 const maskDomain = (host, base) => {
     if (!host || !base || !host.endsWith(base)) return host;
     const prefix = host.substring(0, host.length - base.length); 
@@ -50,6 +52,7 @@ const maskDomain = (host, base) => {
     return maskedPrefix + maskedBase;
 };
 
+// 🚀 域名生成规则
 const generateHostPattern = (pattern, baseDomain) => {
     if (!pattern) pattern = "[4].[3].[base]";
     let h = pattern.replace(/\[base\]/g, baseDomain);
@@ -64,7 +67,7 @@ const generateHostPattern = (pattern, baseDomain) => {
 };
 
 async function run() {
-    console.log("🚀 开始向 Worker 请求 SaaS 任务配置...");
+    console.log("🚀 开始执行 SaaS 幽灵协议...");
     const headers = { 'X-Admin-Password': ADMIN_PWD, 'Content-Type': 'application/json' };
     const [profilesRes, autoConfigRes] = await Promise.all([
         fetch(`${WORKER_URL}/api/saas/profiles`, { headers }),
@@ -88,27 +91,15 @@ async function run() {
         await tg.log(`💀 <b>GlassPanel 幽灵协议 [${currentIndex + 1}/${config.batches.length}] 激活</b>`);
         await tg.log(`\n👁️ <b>目标代号: ${profile.name}</b> (分配 ${task.count} 个动态掩码)`);
         
-        await tg.log(`🗑️ 正在销毁追踪痕迹与废弃路由...`);
+        // 🧹 清理
         try {
-            await fetch(`${WORKER_URL}/api/saas/cleanup`, {
-                method: 'POST', headers,
-                body: JSON.stringify({
-                    profileName: profile.name, baseDomain: profile.baseDomain, apiToken: profile.apiToken, 
-                    saasZoneId: profile.saasZoneId, dnsZoneId: profile.dnsZoneId, snippetRule: profile.snippetRule || ''
-                })
-            });
-            await tg.log(`✅ 痕迹焚毁完毕。`);
-        } catch (e) {
-            await tg.log(`❌ 销毁异常跳过: ${e.message}`);
-        }
+            await fetch(`${WORKER_URL}/api/saas/cleanup`, { method: 'POST', headers, body: JSON.stringify({ profileName: profile.name, baseDomain: profile.baseDomain, apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, dnsZoneId: profile.dnsZoneId, snippetRule: profile.snippetRule || '' }) });
+        } catch (e) {}
 
-        const successfulHosts = [];
         const pendingHosts = [];
-
         for (let i = 0; i < task.count; i++) {
             const host = generateHostPattern(profile.domainPattern, profile.baseDomain); 
             const mask = maskDomain(host, profile.baseDomain); 
-            
             await tg.log(`▶ [身份伪造 ${i+1}/${task.count}] 幽灵 ${mask} 生成中...`);
             
             const createRes = await fetch(`${WORKER_URL}/api/saas/step_create`, {
@@ -116,98 +107,56 @@ async function run() {
                 body: JSON.stringify({ profileName: profile.name, apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, dnsZoneId: profile.dnsZoneId, hostname: host })
             }).then(r => r.json()).catch(() => ({}));
 
-            if (createRes.success) pendingHosts.push({ id: createRes.hostId, host: host, mask: mask, index: i+1 });
+            if (createRes.success) pendingHosts.push({ id: createRes.hostId, host: host, mask: mask, index: i+1, retryCount: 0 });
         }
 
-        if (pendingHosts.length > 0) {
-            await tg.log(`\n⏳ 执行 ${pendingHosts.length} 层反侦察验证...`);
-            
-            for (const item of pendingHosts) {
-                let sslReady = false;
-                
-                // 第一步：向 CF 索要 TXT 验证记录并写入
-                for(let w=0; w<18; w++) { 
-                    await new Promise(r => setTimeout(r, 10000));
-                    const sslRes = await fetch(`${WORKER_URL}/api/saas/step_ssl`, {
-                        method: 'POST', headers,
-                        body: JSON.stringify({ profileName: profile.name, apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, dnsZoneId: profile.dnsZoneId, hostId: item.id })
-                    }).then(r => r.json()).catch(() => ({}));
-                    
-                    if (sslRes.ready) { 
-                        sslReady = true; 
-                        console.log(`[${item.index}] TXT 记录下发且注入指令已发送`);
-                        break; 
-                    }
-                }
+        // 验证与精准补发
+        let activeHosts = [];
+        for (let w = 0; w < 24; w++) { 
+            await new Promise(r => setTimeout(r, 10000)); // 10秒一循环
+            for (let item of pendingHosts) {
+                if (activeHosts.includes(item.host)) continue;
 
-                if (!sslReady) {
-                    await tg.log(`❌ [${item.index}] 幽灵 ${item.mask} 掩码下发失败，目标舍弃`);
-                    continue;
-                }
+                const statusRes = await fetch(`${WORKER_URL}/api/saas/step_status`, {
+                    method: 'POST', headers,
+                    body: JSON.stringify({ apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, hostId: item.id })
+                }).then(r => r.json()).catch(() => ({ active: false }));
 
-                // 第二步：循环等待 CF 验证生效，并加入【双重补发校验】机制
-                let active = false;
-                for(let w=0; w<24; w++) { 
-                    await new Promise(r => setTimeout(r, 10000));
-                    const statusRes = await fetch(`${WORKER_URL}/api/saas/step_status`, {
-                        method: 'POST', headers,
-                        body: JSON.stringify({ apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, hostId: item.id })
-                    }).then(r => r.json()).catch(() => ({}));
-                    
-                    if (statusRes.active) { 
-                        active = true; 
-                        successfulHosts.push(item.host); 
-                        break; 
-                    }
-
-                    // 💡 防阻断核心：如果等了 100 秒（10次循环）还没激活，触发强制补发 TXT 记录
-                    if (w === 10 || w === 18) {
-                        console.log(`[${item.index}] 激活迟滞，触发底层 TXT 强制补发机制 (第 ${w} 次循环)`);
+                if (statusRes.active) {
+                    activeHosts.push(item.host);
+                    await tg.log(` ✅ [${item.index}] 幽灵 ${item.mask} 潜行成功`);
+                } else {
+                    // 精准补发：如果没激活，且重试次数 < 2，触发单点修复
+                    if (item.retryCount < 2) {
+                        item.retryCount++;
+                        await tg.log(`🔄 [${item.index}] ${item.mask} 验证缺失，正在重写 TXT 记录 (第 ${item.retryCount} 次)`);
                         await fetch(`${WORKER_URL}/api/saas/step_ssl`, {
                             method: 'POST', headers,
                             body: JSON.stringify({ profileName: profile.name, apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, dnsZoneId: profile.dnsZoneId, hostId: item.id })
                         }).catch(() => {});
                     }
                 }
-
-                if (active) {
-                    await tg.log(` ✅ [${item.index}] 幽灵 ${item.mask} 潜行成功`);
-                } else {
-                    await tg.log(` ⚠️ [${item.index}] 幽灵 ${item.mask} 遭遇深层干扰 (退入后台轮询)`);
-                    // 即使本次没激活成功，只要 TXT 记录写进去了，CF 迟早会发证。先写入面板以防丢失。
-                    successfulHosts.push(item.host);
-                }
             }
+            if (activeHosts.length === pendingHosts.length) break;
         }
 
-        if (successfulHosts.length > 0) {
-            await tg.log(`\n🔗 正在将新身份注入总控路由...`);
+        // 同步面板
+        if (activeHosts.length > 0) {
             let successCount = 0;
-            
-            for (const host of successfulHosts) {
-                try {
-                    const syncRes = await fetch(`${WORKER_URL}/api/saas/sync_domain`, {
-                        method: 'POST', headers,
-                        body: JSON.stringify({ profileName: profile.name, baseDomain: profile.baseDomain, hostname: host })
-                    }).then(r => r.json());
-                    if (syncRes.success) successCount++;
-                } catch(e) {}
+            for (const host of activeHosts) {
+                const syncRes = await fetch(`${WORKER_URL}/api/saas/sync_domain`, {
+                    method: 'POST', headers,
+                    body: JSON.stringify({ profileName: profile.name, baseDomain: profile.baseDomain, hostname: host })
+                }).then(r => r.json()).catch(()=>({}));
+                if (syncRes.success) successCount++;
             }
-            
-            if(successCount > 0) {
-                await tg.log(`🎉 <b>成功下发 ${successCount} 个免杀隐蔽节点</b>`);
-            } else {
-                await tg.log(`⚠️ 路由注入失败，请检查配置参数`);
-            }
+            await tg.log(`🎉 <b>成功写入 ${successCount} 个免杀隐蔽节点</b>`);
         }
-        await tg.log(`\n🏁 <b>幽灵行动结束，切断所有外部连接。</b>`);
+        await tg.log(`\n🏁 <b>幽灵行动结束。</b>`);
     }
 
     config.currentIndex = (currentIndex + 1) % config.batches.length;
-    await fetch(`${WORKER_URL}/api/saas/auto_config`, {
-        method: 'POST', headers,
-        body: JSON.stringify({ password: ADMIN_PWD, config: config })
-    });
+    await fetch(`${WORKER_URL}/api/saas/auto_config`, { method: 'POST', headers, body: JSON.stringify({ password: ADMIN_PWD, config: config }) });
 }
 
 run();
