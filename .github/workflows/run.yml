@@ -1,7 +1,7 @@
 name: SaaS Engine
 on:
   schedule:
-    - cron: '*/15 * * * *' # 每 15 分钟触发一次
+    - cron: '0 0 */2 * *' # 每 15 分钟触发一次
   workflow_dispatch: # 允许在网页上手动点击运行
 
 jobs:
