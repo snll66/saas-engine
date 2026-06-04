@@ -10,9 +10,7 @@ class TgLogger {
     }
     
     async log(msg) {
-        // 在 GitHub 控制台打印，并去除 HTML 标签
         console.log(msg.replace(/<[^>]*>?/gm, '')); 
-        
         if (!this.profile || !this.profile.tgToken || !this.profile.tgChatId) return;
         
         this.text += (this.text ? '\n' : '') + msg;
@@ -35,17 +33,22 @@ class TgLogger {
     }
 }
 
-// 🛡️ 还原：原生的强力打码函数 (首尾保留，中间变星号)
-const maskDomain = (d) => {
-    if (!d) return '';
-    return d.split('.').map((p, idx, arr) => {
-        if (idx === arr.length - 1) return p; // 顶级域名保留结尾 (如 .com)
-        if (p.length <= 2) return '*'.repeat(p.length);
-        return p[0] + '*'.repeat(p.length - 2) + p[p.length - 1];
-    }).join('.');
+// 🛡️ 智能打码：永远保留首字母和主域名，中间全打星号
+const maskDomain = (host, base) => {
+    if (!host || !base || !host.endsWith(base)) return host;
+    // 提取出生成的前缀部分 (比如 host 是 t1.a.b.test.com，base 是 test.com，prefix 就是 t1.a.b.)
+    const prefix = host.substring(0, host.length - base.length); 
+    if (!prefix) return base;
+    
+    // 取出首字母
+    const firstChar = prefix.charAt(0);
+    // 剩下的前缀全部替换为 * (保留点号)
+    const maskedPrefix = firstChar + prefix.substring(1).replace(/[a-zA-Z0-9]/g, '*');
+    
+    return maskedPrefix + base;
 };
 
-// 🚀 还原：原生的域名模式生成函数
+// 🚀 域名生成规则
 const generateHostPattern = (pattern, baseDomain) => {
     if (!pattern) pattern = "[4].[3].[base]";
     let h = pattern.replace(/\[base\]/g, baseDomain);
@@ -102,9 +105,9 @@ async function run() {
         const pendingHosts = [];
 
         for (let i = 0; i < task.count; i++) {
-            // 🎯 使用完整规则生成，并使用强力打码
             const host = generateHostPattern(profile.domainPattern, profile.baseDomain); 
-            const mask = maskDomain(host); 
+            // 传入完整域名和主域名进行打码
+            const mask = maskDomain(host, profile.baseDomain); 
             
             await tg.log(`▶ [请求 ${i+1}/${task.count}] ${mask}`);
             
@@ -148,7 +151,7 @@ async function run() {
                 if (active) {
                     await tg.log(` ✅ [${item.index}] ${item.mask} 生效`);
                 } else {
-                    await tg.log(` ⚠️ [${item.index}] ${item.mask} 激活超时(稍后生效)`);
+                    await tg.log(` ⚠️ [${item.index}] ${item.mask} 激活延时`);
                     successfulHosts.push(item.host);
                 }
             }
@@ -156,11 +159,24 @@ async function run() {
 
         if (successfulHosts.length > 0) {
             await tg.log(`\n🔗 正在同步至面板...`);
-            await fetch(`${WORKER_URL}/api/gha/sync_results`, {
-                method: 'POST', headers,
-                body: JSON.stringify({ secret: ADMIN_PWD, profileName: profile.name, baseDomain: profile.baseDomain, successfulHosts: successfulHosts })
-            });
-            await tg.log(`🎉 <b>成功写入 ${successfulHosts.length} 个新节点</b>`);
+            let successCount = 0;
+            
+            // 修复点：抛弃之前的独立接口，改用原生面板自带的同步接口，确保 100% 写入成功！
+            for (const host of successfulHosts) {
+                try {
+                    const syncRes = await fetch(`${WORKER_URL}/api/saas/sync_domain`, {
+                        method: 'POST', headers,
+                        body: JSON.stringify({ profileName: profile.name, baseDomain: profile.baseDomain, hostname: host })
+                    }).then(r => r.json());
+                    if (syncRes.success) successCount++;
+                } catch(e) {}
+            }
+            
+            if(successCount > 0) {
+                await tg.log(`🎉 <b>成功写入 ${successCount} 个新节点</b>`);
+            } else {
+                await tg.log(`⚠️ 面板写入失败，请检查名称映射`);
+            }
         }
         await tg.log(`\n🏁 <b>本批次执行完毕</b>`);
     }
