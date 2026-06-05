@@ -178,7 +178,7 @@ async function run() {
 
         // 3. 验证与精准补发
         let activeHosts = [];
-        for (let w = 0; w < 24; w++) { 
+        for (let w = 0; w < 36; w++) { 
             await new Promise(r => setTimeout(r, 10000)); 
             for (let item of pendingHosts) {
                 if (activeHosts.includes(item.host)) continue;
@@ -205,17 +205,22 @@ async function run() {
             if (activeHosts.length === pendingHosts.length) break;
         }
 
-        // 4. 同步面板
+        // 4. 同步面板 (批量打包并发防覆盖)
         if (activeHosts.length > 0) {
-            let successCount = 0;
-            for (const host of activeHosts) {
+            await tg.log(`\n🔗 正在将 ${activeHosts.length} 个域名批量同步至主面板...`);
+            try {
                 const syncRes = await fetch(`${WORKER_URL}/api/saas/sync_domain`, {
                     method: 'POST', headers,
-                    body: JSON.stringify({ profileName: profile.name, baseDomain: profile.baseDomain, hostname: host })
+                    body: JSON.stringify({ profileName: profile.name, baseDomain: profile.baseDomain, hostname: activeHosts })
                 }).then(r => r.json()).catch(()=>({}));
-                if (syncRes.success) successCount++;
+                if (syncRes.success) {
+                    await tg.log(`🎉 <b>成功写入 ${activeHosts.length} 个免杀隐蔽节点</b>`);
+                } else {
+                    await tg.log(`⚠️ 面板同步失败: ` + syncRes.msg);
+                }
+            } catch(e) {
+                await tg.log(`❌ 同步 API 异常`);
             }
-            await tg.log(`🎉 <b>成功下发 ${successCount} 个免杀隐蔽节点</b>`);
         }
 
         // 5. 兜底清理：本轮失败的立刻销毁
