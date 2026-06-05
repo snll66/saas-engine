@@ -90,14 +90,14 @@ async function run() {
         const tg = new TgLogger(profile);
         await tg.log(`💀 <b>GlassPanel 幽灵协议 [${currentIndex + 1}/${config.batches.length}] 激活</b>`);
         
-        // 1. 🧹 清理旧资源
-        await tg.log(`🗑️ 正在抹除旧域名与云端残留...`);
+        // 1. 🧹 全局宏观清理（清理历史遗留）
+        await tg.log(`🗑️ 正在抹除历史云端残留...`);
         try {
             await fetch(`${WORKER_URL}/api/saas/cleanup`, {
                 method: 'POST', headers,
                 body: JSON.stringify({ profileName: profile.name, baseDomain: profile.baseDomain, apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, dnsZoneId: profile.dnsZoneId, snippetRule: profile.snippetRule || '' })
             });
-            await tg.log(`✅ 废弃资产清理完毕。`);
+            await tg.log(`✅ 历史残留清扫完毕。`);
         } catch (e) {}
 
         await tg.log(`👁️ <b>目标代号: ${profile.name}</b> (分配 ${task.count} 个动态掩码)`);
@@ -117,11 +117,10 @@ async function run() {
             if (createRes.success) pendingHosts.push({ id: createRes.hostId, host: host, mask: mask, index: i+1 });
         }
 
-        // 3. ⚡ 核心修复：并发下发初始 TXT 写入指令 (绝不再干等)
+        // 3. ⚡ 并发下发初始 TXT 写入指令
         if (pendingHosts.length > 0) {
             await tg.log(`\n⏳ 并发下发 TXT 注入指令，等待全网解析...`);
             for (const item of pendingHosts) {
-                // 异步触发，不阻塞
                 fetch(`${WORKER_URL}/api/saas/step_ssl`, {
                     method: 'POST', headers,
                     body: JSON.stringify({ profileName: profile.name, apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, dnsZoneId: profile.dnsZoneId, hostId: item.id })
@@ -129,16 +128,14 @@ async function run() {
             }
         }
 
-        // 4. 🎯 并发轮询与【精准定时补发】
+        // 4. 🎯 并发轮询与精准定时补发
         let activeHosts = [];
-        // 循环 20 次，每次 15 秒，共计 5 分钟
         for (let w = 1; w <= 20; w++) { 
             await new Promise(r => setTimeout(r, 15000)); 
             
             for (let item of pendingHosts) {
-                if (activeHosts.includes(item.host)) continue; // 活了就跳过，不浪费性能
+                if (activeHosts.includes(item.host)) continue;
 
-                // 查询真实状态
                 const statusRes = await fetch(`${WORKER_URL}/api/saas/step_status`, {
                     method: 'POST', headers,
                     body: JSON.stringify({ apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, hostId: item.id })
@@ -148,11 +145,9 @@ async function run() {
                     activeHosts.push(item.host);
                     await tg.log(` ✅ [${item.index}] 幽灵 ${item.mask} 潜行成功`);
                 } else {
-                    // 🎯 到了第 6 次(90秒)和第 12 次(180秒)，如果还没活，才触发精准单点修复
                     if (w === 6 || w === 12) {
                         const retryNum = w === 6 ? 1 : 2;
-                        await tg.log(`🔄 [${item.index}] ${item.mask} 激活动力不足，触发单点精准 TXT 补发 (第 ${retryNum} 次)...`);
-                        // 异步补发，不阻塞其他域名的查询
+                        await tg.log(`🔄 [${item.index}] ${item.mask} 激活动力不足，触发精准 TXT 补发 (第 ${retryNum} 次)...`);
                         fetch(`${WORKER_URL}/api/saas/step_ssl`, {
                             method: 'POST', headers,
                             body: JSON.stringify({ profileName: profile.name, apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, dnsZoneId: profile.dnsZoneId, hostId: item.id })
@@ -160,7 +155,6 @@ async function run() {
                     }
                 }
             }
-            // 如果全都成功了，提前结束 5 分钟的苦等！
             if (activeHosts.length === pendingHosts.length) break;
         }
 
@@ -179,6 +173,27 @@ async function run() {
         } else {
             await tg.log(`⚠️ <b>本次轮询未产生可用节点，已转入休眠。</b>`);
         }
+
+        // 6. 💥【新增核心逻辑】暴露节点物理清场！强行销毁本次过不了的域名
+        const failedHosts = pendingHosts.filter(p => !activeHosts.includes(p.host));
+        if (failedHosts.length > 0) {
+            await tg.log(`\n💥 发现 ${failedHosts.length} 个遭遇干扰的暴露掩码，执行物理销毁...`);
+            for (const item of failedHosts) {
+                try {
+                    // 调用 Cloudflare 原生 API 强行抹除该 Custom Hostname
+                    await fetch(`https://api.cloudflare.com/client/v4/zones/${profile.saasZoneId}/custom_hostnames/${item.id}`, {
+                        method: 'DELETE',
+                        headers: { 
+                            'Authorization': `Bearer ${profile.apiToken}`, 
+                            'Content-Type': 'application/json' 
+                        }
+                    });
+                    console.log(`[${item.index}] 已物理销毁废弃域名: ${item.host}`);
+                } catch(e) {}
+            }
+            await tg.log(`✅ 暴露掩码已强行销毁，安全配额已重置。`);
+        }
+
         await tg.log(`\n🏁 <b>幽灵行动结束，切断所有外部连接。</b>`);
     }
 
