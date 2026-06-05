@@ -57,12 +57,11 @@ const generateHostPattern = (pattern, baseDomain) => {
     return h.replace(/[^a-zA-Z0-9.-]/g, '');
 };
 
-// 💥 核心新增：精准定点销毁 (主机名 + A记录 + TXT记录)
+// 💥 核心：精准定点销毁 (主机名 + A记录 + TXT记录)
 async function exactCleanup(host, apiToken, saasZoneId, dnsZoneId) {
     const cfHeaders = { 'Authorization': `Bearer ${apiToken}`, 'Content-Type': 'application/json' };
     let wiped = false;
 
-    // 1. 精准删除 Custom Hostname
     try {
         const chRes = await fetch(`https://api.cloudflare.com/client/v4/zones/${saasZoneId}/custom_hostnames?hostname=${host}`, { headers: cfHeaders }).then(r=>r.json());
         if (chRes.success && chRes.result.length > 0) {
@@ -71,7 +70,6 @@ async function exactCleanup(host, apiToken, saasZoneId, dnsZoneId) {
         }
     } catch(e) {}
 
-    // 2. 精准删除关联的 DNS 记录 (包括自身的 A/CNAME 记录，以及 CF 自动生成的 _acme-challenge TXT 验证记录)
     try {
         const dnsHosts = [host, `_acme-challenge.${host}`];
         for (const dHost of dnsHosts) {
@@ -84,7 +82,6 @@ async function exactCleanup(host, apiToken, saasZoneId, dnsZoneId) {
             }
         }
     } catch(e) {}
-    
     return wiped;
 }
 
@@ -114,26 +111,35 @@ async function run() {
         
         // 1. 🧹 精准读取上一批次的“死亡名单”并执行拔草除根
         if (task.lastHosts && task.lastHosts.length > 0) {
-            await tg.log(`🗑️ 锁定上一周期生成的 ${task.lastHosts.length} 个废弃节点，执行精准销毁...`);
+            await tg.log(`🗑️ 锁定历史遗留的 ${task.lastHosts.length} 个废弃节点，执行精准销毁...`);
             let wipeCount = 0;
             for (const oldHost of task.lastHosts) {
                 const isWiped = await exactCleanup(oldHost, profile.apiToken, profile.saasZoneId, profile.dnsZoneId);
                 if (isWiped) wipeCount++;
             }
-            await tg.log(`✅ 成功将 ${wipeCount} 个旧节点的配额与 DNS 痕迹彻底抹除。`);
-        } else {
-            await tg.log(`🗑️ 未检测到历史轮询名单，跳过清场。`);
+            await tg.log(`✅ 成功将历史节点的配额与 DNS 痕迹彻底抹除。`);
         }
 
         await tg.log(`👁️ <b>目标代号: ${profile.name}</b> (分配 ${task.count} 个动态掩码)`);
         
-        // 2. 并发创建
+        // 2. ⚡ 并发创建 (包含写入 A 记录)
         const pendingHosts = [];
         for (let i = 0; i < task.count; i++) {
             const host = generateHostPattern(profile.domainPattern, profile.baseDomain); 
             const mask = maskDomain(host, profile.baseDomain); 
-            await tg.log(`▶ [身份伪造 ${i+1}/${task.count}] 幽灵 ${mask} 生成中...`);
+            await tg.log(`▶ [身份伪造 ${i+1}/${task.count}] 幽灵 ${mask} 生成并注入路由...`);
             
+            // 💥 新增核心：直接强制向 CF 写入带小黄云的 A 记录 (192.0.2.1)
+            try {
+                await fetch(`https://api.cloudflare.com/client/v4/zones/${profile.dnsZoneId}/dns_records`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${profile.apiToken}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ type: 'A', name: host, content: '192.0.2.1', ttl: 1, proxied: true })
+                });
+            } catch(e) {
+                console.log(`[${i+1}] A 记录写入异常`);
+            }
+
             const createRes = await fetch(`${WORKER_URL}/api/saas/step_create`, {
                 method: 'POST', headers,
                 body: JSON.stringify({ profileName: profile.name, apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, dnsZoneId: profile.dnsZoneId, hostname: host })
@@ -160,7 +166,7 @@ async function run() {
                 } else {
                     if (item.retryCount < 2) {
                         item.retryCount++;
-                        await tg.log(`🔄 [${item.index}] ${item.mask} 验证缺失，正在重写 TXT 记录 (第 ${item.retryCount} 次)`);
+                        await tg.log(`🔄 [${item.index}] ${item.mask} 验证缺失，正在重发 TXT 探针 (第 ${item.retryCount} 次)`);
                         await fetch(`${WORKER_URL}/api/saas/step_ssl`, {
                             method: 'POST', headers,
                             body: JSON.stringify({ profileName: profile.name, apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, dnsZoneId: profile.dnsZoneId, hostId: item.id })
@@ -184,24 +190,21 @@ async function run() {
             await tg.log(`🎉 <b>成功下发 ${successCount} 个免杀隐蔽节点</b>`);
         }
 
-        // 5. 💥 兜底：如果本次刚生成的域名有失败的，立刻就地正法！
+        // 5. 兜底清理：本轮失败的立刻销毁
         const failedHosts = pendingHosts.filter(p => !activeHosts.includes(p.host));
         if (failedHosts.length > 0) {
             await tg.log(`\n💥 发现 ${failedHosts.length} 个废弃掩码，立刻执行深度销毁...`);
             for (const item of failedHosts) {
                 await exactCleanup(item.host, profile.apiToken, profile.saasZoneId, profile.dnsZoneId);
             }
-            await tg.log(`✅ 废弃节点与 DNS 记录已全部清除。`);
         }
 
-        // 📝 6. 将本次生成的所有域名（无论死活，因为死了的已经被上一步干掉了，活着的留给下次）记录进任务的“死亡名册”
+        // 6. 记录本轮生成的所有域名（交给下一轮去销毁）
         task.lastHosts = pendingHosts.map(p => p.host);
-
         await tg.log(`\n🏁 <b>幽灵行动结束，行动记录已归档。</b>`);
     }
 
     config.currentIndex = (currentIndex + 1) % config.batches.length;
-    // 💾 最后这一步：把带着 lastHosts（死亡名册）的任务列表推回 Worker 妥善保管！
     await fetch(`${WORKER_URL}/api/saas/auto_config`, { method: 'POST', headers, body: JSON.stringify({ password: ADMIN_PWD, config: config }) });
 }
 
