@@ -1,172 +1,159 @@
-const WORKER_URL = process.env.WORKER_URL;
-const ADMIN_PWD = process.env.ADMIN_PWD;
+// ==========================================
+// 🧹 强化版：严格状态同步清理引擎 (修复清理不干净Bug)
+// ==========================================
+const cleanupOldHosts = async (env, profile, logTg = null) => {
+    const key = `managed_${profile.name}`;
+    const managed = await storageGet(env, key) || [];
+    let cfDeleteSuccessCount = 0;
+    let cfDeleteFailCount = 0;
+    let failedHostnames = [];
 
-// 🤖 专属 TG 直播播报员
-class TgLogger {
-    constructor(profile) {
-        this.profile = profile;
-        this.msgId = null;
-        this.text = '';
-    }
-    
-    async log(msg) {
-        console.log(msg.replace(/<[^>]*>?/gm, '')); 
-        if (!this.profile || !this.profile.tgToken || !this.profile.tgChatId) return;
+    // 1. 严格按账本清理云端 CF 记录 (带状态校验)
+    if (managed.length > 0) {
+        if(logTg) await logTg(`🧹 [${profile.name}] 开始清理上次生成的 ${managed.length} 个动态域名...`);
         
-        this.text += (this.text ? '\n' : '') + msg;
-        try {
-            const headers = { 'X-Admin-Password': ADMIN_PWD, 'Content-Type': 'application/json' };
-            const body = JSON.stringify({
-                tgToken: this.profile.tgToken, 
-                tgChatId: this.profile.tgChatId, 
-                text: this.text,
-                message_id: this.msgId
-            });
-
-            if (!this.msgId) {
-                const res = await fetch(`${WORKER_URL}/api/saas/tg_send`, { method: 'POST', headers, body }).then(r => r.json()).catch(()=>({}));
-                if (res.result) this.msgId = res.result.message_id;
-            } else {
-                await fetch(`${WORKER_URL}/api/saas/tg_edit`, { method: 'POST', headers, body }).catch(()=>{});
-            }
-        } catch(e) {}
-    }
-}
-
-// 🛡️ 智能全域打码：前缀保留首字母，主域名半打码
-const maskDomain = (host, base) => {
-    if (!host || !base || !host.endsWith(base)) return host;
-    const prefix = host.substring(0, host.length - base.length); 
-    if (!prefix) return base;
-    
-    const firstChar = prefix.charAt(0);
-    const maskedPrefix = firstChar + prefix.substring(1).replace(/[a-zA-Z0-9]/g, '*');
-    
-    const baseParts = base.split('.');
-    const maskedBase = baseParts.map((p, idx, arr) => {
-        if (idx === arr.length - 1) return p; 
-        if (p.length <= 2) return '*'.repeat(p.length);
-        return p.charAt(0) + '*'.repeat(p.length - 2) + p.charAt(p.length - 1);
-    }).join('.');
-    
-    return maskedPrefix + maskedBase;
-};
-
-// 🚀 域名生成规则
-const generateHostPattern = (pattern, baseDomain) => {
-    if (!pattern) pattern = "[4].[3].[base]";
-    let h = pattern.replace(/\[base\]/g, baseDomain);
-    h = h.replace(/\[([^\]]+)\]/g, (_, val) => {
-        let len = parseInt(val);
-        if (isNaN(len)) len = val.length;
-        let res = '';
-        while (res.length < len) res += Math.random().toString(36).substring(2);
-        return res.substring(0, len);
-    });
-    return h.replace(/[^a-zA-Z0-9.-]/g, '');
-};
-
-async function run() {
-    console.log("🚀 开始执行 SaaS 幽灵协议...");
-    const headers = { 'X-Admin-Password': ADMIN_PWD, 'Content-Type': 'application/json' };
-    const [profilesRes, autoConfigRes] = await Promise.all([
-        fetch(`${WORKER_URL}/api/saas/profiles`, { headers }),
-        fetch(`${WORKER_URL}/api/saas/auto_config`, { headers })
-    ]);
-
-    const profiles = await profilesRes.json();
-    const config = await autoConfigRes.json();
-
-    if (!config || !config.batches || config.batches.length === 0) return console.log("💤 无任务。");
-
-    let currentIndex = config.currentIndex || 0;
-    if (currentIndex >= config.batches.length) currentIndex = 0;
-    const currentBatch = config.batches[currentIndex];
-    
-    for (const task of currentBatch) {
-        const profile = profiles.find(p => p.name === task.profileName);
-        if (!profile) continue;
-
-        const tg = new TgLogger(profile);
-        await tg.log(`💀 <b>GlassPanel 幽灵协议 [${currentIndex + 1}/${config.batches.length}] 激活</b>`);
-        
-        // 1. 🧹 先清理旧资源，保证配额充足
-        await tg.log(`🗑️ 正在抹除旧域名与云端残留...`);
-        try {
-            const cleanupRes = await fetch(`${WORKER_URL}/api/saas/cleanup`, {
-                method: 'POST', headers,
-                body: JSON.stringify({ profileName: profile.name, baseDomain: profile.baseDomain, apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, dnsZoneId: profile.dnsZoneId, snippetRule: profile.snippetRule || '' })
-            });
-            const cleanupJson = await cleanupRes.json();
-            await tg.log(`✅ 废弃资产清理完毕: ${cleanupJson.message || 'SUCCESS'}`);
-        } catch (e) {
-            await tg.log(`⚠️ 清理指令发送失败，但已强制进入重构阶段...`);
-        }
-
-        await tg.log(`👁️ <b>目标代号: ${profile.name}</b> (分配 ${task.count} 个动态掩码)`);
-        
-        // 2. 并发创建
-        const pendingHosts = [];
-        for (let i = 0; i < task.count; i++) {
-            const host = generateHostPattern(profile.domainPattern, profile.baseDomain); 
-            const mask = maskDomain(host, profile.baseDomain); 
-            await tg.log(`▶ [身份伪造 ${i+1}/${task.count}] 幽灵 ${mask} 生成中...`);
+        for (let host of managed) {
+            let isHostCleaned = true; // 假设初始为干净
             
-            const createRes = await fetch(`${WORKER_URL}/api/saas/step_create`, {
-                method: 'POST', headers,
-                body: JSON.stringify({ profileName: profile.name, apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, dnsZoneId: profile.dnsZoneId, hostname: host })
-            }).then(r => r.json()).catch(() => ({}));
+            // 清理 DNS 记录
+            const targetDnsZoneId = await getTargetDnsZoneId(host.hostname, profile.apiToken, profile.dnsZoneId);
+            for (let dId of (host.dnsIds || [])) {
+                try {
+                    const delRes = await fetch(`https://api.cloudflare.com/client/v4/zones/${targetDnsZoneId}/dns_records/${dId}`, {
+                        method: 'DELETE', headers: getCfHeaders(profile.apiToken)
+                    });
+                    const delData = await delRes.json();
+                    if (!delData.success) {
+                        isHostCleaned = false;
+                        if(logTg) await logTg(`⚠️ DNS ${dId} 删除失败: ${delData.errors[0]?.message}`);
+                    }
+                } catch(e) {
+                    isHostCleaned = false;
+                    if(logTg) await logTg(`⚠️ DNS ${dId} 请求异常: ${e.message}`);
+                }
+            }
+            
+            // 清理 Custom Hostname
+            try {
+                const chRes = await fetch(`https://api.cloudflare.com/client/v4/zones/${profile.saasZoneId}/custom_hostnames/${host.hostId}`, {
+                    method: 'DELETE', headers: getCfHeaders(profile.apiToken)
+                });
+                const chData = await chRes.json();
+                if (!chData.success) {
+                    isHostCleaned = false;
+                    if(logTg) await logTg(`⚠️ Hostname ${host.hostId} 删除失败: ${chData.errors[0]?.message}`);
+                }
+            } catch(e) {
+                isHostCleaned = false;
+                if(logTg) await logTg(`⚠️ Hostname ${host.hostId} 请求异常: ${e.message}`);
+            }
 
-            if (createRes.success) pendingHosts.push({ id: createRes.hostId, host: host, mask: mask, index: i+1, retryCount: 0 });
+            // 🌟 核心修复：只有 CF 云端真正删干净了，才计入成功数
+            if (isHostCleaned) {
+                cfDeleteSuccessCount++;
+            } else {
+                cfDeleteFailCount++;
+                failedHostnames.push(host.hostname); // 记录失败域名，绝不能从账本剔除！
+            }
         }
+        
+        if(logTg) await logTg(`📊 账本清理结果: 成功 ${cfDeleteSuccessCount} 个，失败 ${cfDeleteFailCount} 个`);
+    }
 
-        // 3. 验证与精准补发
-        let activeHosts = [];
-        for (let w = 0; w < 24; w++) { 
-            await new Promise(r => setTimeout(r, 10000)); // 10秒一循环
-            for (let item of pendingHosts) {
-                if (activeHosts.includes(item.host)) continue;
-
-                const statusRes = await fetch(`${WORKER_URL}/api/saas/step_status`, {
-                    method: 'POST', headers,
-                    body: JSON.stringify({ apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, hostId: item.id })
-                }).then(r => r.json()).catch(() => ({ active: false }));
-
-                if (statusRes.active) {
-                    activeHosts.push(item.host);
-                    await tg.log(` ✅ [${item.index}] 幽灵 ${item.mask} 潜行成功`);
-                } else {
-                    // 精准补发：如果没激活，且重试 < 2 次，触发单点修复
-                    if (item.retryCount < 2) {
-                        item.retryCount++;
-                        await tg.log(`🔄 [${item.index}] ${item.mask} 验证缺失，正在重写 TXT 记录 (第 ${item.retryCount} 次)`);
-                        await fetch(`${WORKER_URL}/api/saas/step_ssl`, {
-                            method: 'POST', headers,
-                            body: JSON.stringify({ profileName: profile.name, apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, dnsZoneId: profile.dnsZoneId, hostId: item.id })
-                        }).catch(() => {});
+    // 🚀 2. 终极兜底：全量拉取 CF 云端，直接比对抹杀（不依赖本地账本）
+    if(logTg) await logTg(`🔎 启动云端全量扫描，防止孤儿域名逃逸...`);
+    let orphanKilled = 0;
+    
+    try {
+        // 拉取 SaaS Zone 下的所有 Custom Hostnames
+        let page = 1;
+        let hasMore = true;
+        while (hasMore) {
+            const listRes = await fetch(`https://api.cloudflare.com/client/v4/zones/${profile.saasZoneId}/custom_hostnames?per_page=100&page=${page}`, {
+                headers: getCfHeaders(profile.apiToken)
+            });
+            const listData = await listRes.json();
+            
+            if (!listData.success) break;
+            
+            for (let ch of listData.result) {
+                const hostname = ch.hostname;
+                // 只处理属于该 baseDomain 的子域名
+                if (hostname !== profile.baseDomain && hostname.endsWith(`.${profile.baseDomain}`)) {
+                    // 检查是否在失败列表或已成功列表里，避免重复删
+                    const isAlreadyHandled = managed.some(m => m.hostname === hostname);
+                    if (!isAlreadyHandled) {
+                        if(logTg) await logTg(`💀 发现孤儿域名: ${hostname}，执行云端抹杀...`);
+                        try {
+                            await fetch(`https://api.cloudflare.com/client/v4/zones/${profile.saasZoneId}/custom_hostnames/${ch.id}`, {
+                                method: 'DELETE', headers: getCfHeaders(profile.apiToken)
+                            });
+                            // 同步清理其 DNS 记录
+                            const ghostZoneId = await getTargetDnsZoneId(hostname, profile.apiToken, profile.dnsZoneId);
+                            const dnsRes = await fetch(`https://api.cloudflare.com/client/v4/zones/${ghostZoneId}/dns_records?name=${hostname}`, {
+                                headers: getCfHeaders(profile.apiToken)
+                            });
+                            const dnsData = await dnsRes.json();
+                            if (dnsData.success) {
+                                for (let r of dnsData.result) {
+                                    await fetch(`https://api.cloudflare.com/client/v4/zones/${ghostZoneId}/dns_records/${r.id}`, {
+                                        method: 'DELETE', headers: getCfHeaders(profile.apiToken)
+                                    });
+                                }
+                            }
+                            orphanKilled++;
+                        } catch(e) {
+                            if(logTg) await logTg(`⚠️ 孤儿 ${hostname} 抹杀异常: ${e.message}`);
+                        }
                     }
                 }
             }
-            if (activeHosts.length === pendingHosts.length) break;
-        }
-
-        // 4. 同步面板
-        if (activeHosts.length > 0) {
-            let successCount = 0;
-            for (const host of activeHosts) {
-                const syncRes = await fetch(`${WORKER_URL}/api/saas/sync_domain`, {
-                    method: 'POST', headers,
-                    body: JSON.stringify({ profileName: profile.name, baseDomain: profile.baseDomain, hostname: host })
-                }).then(r => r.json()).catch(()=>({}));
-                if (syncRes.success) successCount++;
+            
+            // 判断是否还有下一页
+            const resultInfo = listData.result_info;
+            if (!resultInfo || page >= resultInfo.total_pages) {
+                hasMore = false;
+            } else {
+                page++;
             }
-            await tg.log(`🎉 <b>成功下发 ${successCount} 个免杀隐蔽节点</b>`);
         }
-        await tg.log(`\n🏁 <b>幽灵行动结束，切断所有外部连接。</b>`);
+    } catch(e) {
+        if(logTg) await logTg(`⚠️ 全量扫描过程异常: ${e.message}`);
     }
 
-    config.currentIndex = (currentIndex + 1) % config.batches.length;
-    await fetch(`${WORKER_URL}/api/saas/auto_config`, { method: 'POST', headers, body: JSON.stringify({ password: ADMIN_PWD, config: config }) });
-}
+    // 3. 更新本地账本：只剔除云端确认删除成功的，保留失败的！
+    let newManaged = managed.filter(m => failedHostnames.includes(m.hostname));
+    await storagePut(env, key, newManaged);
 
-run();
+    // 4. 强制同步清理主面板配置 (剔除所有该 profile 的动态域名)
+    let glassConfig = await storageGet(env, "user_config") || {};
+    let servers = glassConfig.servers || [];
+    let targetServerIndex = servers.findIndex(s => s.name === profile.name);
+    
+    // 兜底匹配
+    if (targetServerIndex === -1 && profile.baseDomain) {
+        targetServerIndex = servers.findIndex(s => {
+            let h = s.host.split('\n').map(x=>x.trim()).filter(x=>x);
+            return h.length > 0 && h[0] === profile.baseDomain;
+        });
+    }
+
+    if (targetServerIndex !== -1) {
+        let hosts = servers[targetServerIndex].host.split('\n').map(h => h.trim()).filter(h => h);
+        // 只保留基础域名，或者其他非该 baseDomain 的域名
+        let remainingHosts = hosts.filter(h => h === profile.baseDomain || !h.endsWith(`.${profile.baseDomain}`));
+        
+        let newHostStr = remainingHosts.join('\n');
+        if (servers[targetServerIndex].host !== newHostStr) {
+            servers[targetServerIndex].host = newHostStr;
+            glassConfig.servers = servers;
+            await storagePut(env, "user_config", glassConfig);
+            if(logTg) await logTg(`🧹 主面板配置已强制剔除动态域名。`);
+        }
+    }
+    
+    if(logTg) await logTg(`✅ 清理引擎休眠 (账本:${cfDeleteSuccessCount}成功/${cfDeleteFailCount}失败保留, 孤儿抹杀:${orphanKilled}个)`);
+    
+    // 🌟 核心返回值：告诉调用者是否有未清理干净的失败项
+    return { success: cfDeleteFailCount === 0, failedCount: cfDeleteFailCount, orphanKilled };
+};
