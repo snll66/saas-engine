@@ -62,6 +62,7 @@ async function exactCleanup(host, apiToken, saasZoneId, dnsZoneId) {
     const cfHeaders = { 'Authorization': `Bearer ${apiToken}`, 'Content-Type': 'application/json' };
     let wiped = false;
 
+    // 1. 删除主机名
     try {
         const chRes = await fetch(`https://api.cloudflare.com/client/v4/zones/${saasZoneId}/custom_hostnames?hostname=${host}`, { headers: cfHeaders }).then(r=>r.json());
         if (chRes.success && chRes.result.length > 0) {
@@ -70,6 +71,7 @@ async function exactCleanup(host, apiToken, saasZoneId, dnsZoneId) {
         }
     } catch(e) {}
 
+    // 2. 深度清理关联的 A 记录和 TXT 验证记录
     try {
         const dnsHosts = [host, `_acme-challenge.${host}`];
         for (const dHost of dnsHosts) {
@@ -109,16 +111,45 @@ async function run() {
         const tg = new TgLogger(profile);
         await tg.log(`💀 <b>GlassPanel 幽灵协议 [${currentIndex + 1}/${config.batches.length}] 激活</b>`);
         
-        // 1. 🧹 精准读取上一批次的“死亡名单”并执行拔草除根
-        if (task.lastHosts && task.lastHosts.length > 0) {
-            await tg.log(`🗑️ 锁定历史遗留的 ${task.lastHosts.length} 个废弃节点，执行精准销毁...`);
+        // -------------------------------------------------------------
+        // 1. 🔍 核心变动：从面板直接拉取当前节点的真实名单
+        // -------------------------------------------------------------
+        let panelHosts = [];
+        try {
+            // 假设你的 profile 里直接包含了该节点当前的域名数组，或者通过 list_domains 接口获取
+            if (profile.domains && Array.isArray(profile.domains)) {
+                panelHosts = profile.domains;
+            } else {
+                const listRes = await fetch(`${WORKER_URL}/api/saas/list_domains`, {
+                    method: 'POST', headers, body: JSON.stringify({ profileName: profile.name, baseDomain: profile.baseDomain })
+                }).then(r => r.json()).catch(()=>({}));
+                if (listRes.success && listRes.domains) panelHosts = listRes.domains;
+            }
+        } catch(e) {}
+
+        // 将面板里查到的真实名单与上次脚本记录的 lastHosts 合并去重，做到宁可错杀一千绝不放过一个！
+        const allOldHosts = [...new Set([...(task.lastHosts || []), ...panelHosts])];
+
+        if (allOldHosts.length > 0) {
+            await tg.log(`🗑️ 锁定面板与历史遗留的 ${allOldHosts.length} 个废弃节点，执行精准销毁...`);
             let wipeCount = 0;
-            for (const oldHost of task.lastHosts) {
+            for (const oldHost of allOldHosts) {
                 const isWiped = await exactCleanup(oldHost, profile.apiToken, profile.saasZoneId, profile.dnsZoneId);
                 if (isWiped) wipeCount++;
             }
-            await tg.log(`✅ 成功将历史节点的配额与 DNS 痕迹彻底抹除。`);
+            await tg.log(`✅ 成功将 ${wipeCount} 个旧节点的配额与 DNS (A/TXT) 痕迹彻底抹除。`);
+        } else {
+            await tg.log(`🗑️ 面板记录为空，云端环境干净。`);
         }
+
+        // 🚨 物理清场完毕后，再去呼叫 Worker 把面板数据库里的关联给断掉，保证两边状态对齐
+        try {
+            await fetch(`${WORKER_URL}/api/saas/cleanup`, {
+                method: 'POST', headers,
+                body: JSON.stringify({ profileName: profile.name, baseDomain: profile.baseDomain, apiToken: profile.apiToken, saasZoneId: profile.saasZoneId, dnsZoneId: profile.dnsZoneId, snippetRule: profile.snippetRule || '' })
+            });
+        } catch (e) {}
+        // -------------------------------------------------------------
 
         await tg.log(`👁️ <b>目标代号: ${profile.name}</b> (分配 ${task.count} 个动态掩码)`);
         
@@ -129,16 +160,13 @@ async function run() {
             const mask = maskDomain(host, profile.baseDomain); 
             await tg.log(`▶ [身份伪造 ${i+1}/${task.count}] 幽灵 ${mask} 生成并注入路由...`);
             
-            // 💥 新增核心：直接强制向 CF 写入带小黄云的 A 记录 (192.0.2.1)
             try {
                 await fetch(`https://api.cloudflare.com/client/v4/zones/${profile.dnsZoneId}/dns_records`, {
                     method: 'POST',
                     headers: { 'Authorization': `Bearer ${profile.apiToken}`, 'Content-Type': 'application/json' },
                     body: JSON.stringify({ type: 'A', name: host, content: '192.0.2.1', ttl: 1, proxied: true })
                 });
-            } catch(e) {
-                console.log(`[${i+1}] A 记录写入异常`);
-            }
+            } catch(e) {}
 
             const createRes = await fetch(`${WORKER_URL}/api/saas/step_create`, {
                 method: 'POST', headers,
@@ -199,7 +227,7 @@ async function run() {
             }
         }
 
-        // 6. 记录本轮生成的所有域名（交给下一轮去销毁）
+        // 6. 记录本轮生成的所有域名
         task.lastHosts = pendingHosts.map(p => p.host);
         await tg.log(`\n🏁 <b>幽灵行动结束，行动记录已归档。</b>`);
     }
