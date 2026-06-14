@@ -239,6 +239,74 @@ async function run() {
 
     config.currentIndex = (currentIndex + 1) % config.batches.length;
     await fetch(`${WORKER_URL}/api/saas/auto_config`, { method: 'POST', headers, body: JSON.stringify({ password: ADMIN_PWD, config: config }) });
+
+    // ⚡ Workers SaaS 轮询队列处理
+    const wsaasConfigRes = await fetch(`${WORKER_URL}/api/wsaas/auto_config`, { headers });
+    const wsaasConfig = await wsaasConfigRes.json().catch(() => ({}));
+
+    if (wsaasConfig && wsaasConfig.batches && wsaasConfig.batches.length > 0) {
+        let wsaasIdx = wsaasConfig.currentIndex || 0;
+        if (wsaasIdx >= wsaasConfig.batches.length) wsaasIdx = 0;
+        const wsaasBatch = wsaasConfig.batches[wsaasIdx];
+
+        console.log(`⚡ Workers SaaS 轮询 [${wsaasIdx + 1}/${wsaasConfig.batches.length}]`);
+
+        for (const task of wsaasBatch) {
+            try {
+                const runRes = await fetch(`${WORKER_URL}/api/wsaas/run`, {
+                    method: 'POST', headers,
+                    body: JSON.stringify({ profileName: task.profileName, count: task.count })
+                }).then(r => r.json()).catch(() => ({}));
+
+                if (runRes.success) {
+                    console.log(`  ✅ Workers [${task.profileName}] 执行成功`);
+                } else {
+                    console.log(`  ❌ Workers [${task.profileName}] 执行失败: ${runRes.msg || '未知'}`);
+                }
+            } catch(e) {
+                console.log(`  ❌ Workers [${task.profileName}] 异常: ${e.message}`);
+            }
+        }
+
+        wsaasConfig.currentIndex = (wsaasIdx + 1) % wsaasConfig.batches.length;
+        await fetch(`${WORKER_URL}/api/wsaas/auto_config`, { method: 'POST', headers, body: JSON.stringify({ password: ADMIN_PWD, config: wsaasConfig }) });
+    } else {
+        console.log("💤 Workers SaaS 无任务。");
+    }
+
+    // 📄 Pages SaaS 轮询队列处理
+    const psaasConfigRes = await fetch(`${WORKER_URL}/api/psaas/auto_config`, { headers });
+    const psaasConfig = await psaasConfigRes.json().catch(() => ({}));
+
+    if (psaasConfig && psaasConfig.batches && psaasConfig.batches.length > 0) {
+        let psaasIdx = psaasConfig.currentIndex || 0;
+        if (psaasIdx >= psaasConfig.batches.length) psaasIdx = 0;
+        const psaasBatch = psaasConfig.batches[psaasIdx];
+
+        console.log(`📄 Pages SaaS 轮询 [${psaasIdx + 1}/${psaasConfig.batches.length}]`);
+
+        for (const task of psaasBatch) {
+            try {
+                const runRes = await fetch(`${WORKER_URL}/api/psaas/run`, {
+                    method: 'POST', headers,
+                    body: JSON.stringify({ profileName: task.profileName, count: task.count })
+                }).then(r => r.json()).catch(() => ({}));
+
+                if (runRes.success) {
+                    console.log(`  ✅ Pages [${task.profileName}] 执行成功`);
+                } else {
+                    console.log(`  ❌ Pages [${task.profileName}] 执行失败: ${runRes.msg || '未知'}`);
+                }
+            } catch(e) {
+                console.log(`  ❌ Pages [${task.profileName}] 异常: ${e.message}`);
+            }
+        }
+
+        psaasConfig.currentIndex = (psaasIdx + 1) % psaasConfig.batches.length;
+        await fetch(`${WORKER_URL}/api/psaas/auto_config`, { method: 'POST', headers, body: JSON.stringify({ password: ADMIN_PWD, config: psaasConfig }) });
+    } else {
+        console.log("💤 Pages SaaS 无任务。");
+    }
 }
 
 run();
